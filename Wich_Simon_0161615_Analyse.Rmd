@@ -1,0 +1,702 @@
+---
+title: "Wich_Simon_0161615_Analyse.Rmd"
+author: "Simon Wich"
+date: "`r Sys.Date()`"
+output:
+  pdf_document: default
+  html_document: default
+---
+
+## Inhaltsverzeichnis
+
+  I.  Hintergrund und Ziel der Analyse
+
+ II.  Pakete laden und Daten importieren
+
+III.  Explorative Datenanalyse
+
+ IV.  Feauture Engineering
+
+  V.  Modellierung
+  
+ VI.  Abschliessende Prognose und Abgabe
+
+
+
+
+
+
+## I. Hintergrund und Ziel der Analyse
+
+# Fahrradverleihsysteme fuer optimierte urbane Mobilitaet
+
+In einer aera zunehmender urbaner Mobilitaet sind innovative Loesungen gefragt, um den staedtischen Verkehr zu entlasten und gleichzeitig den Komfort der Bewohner zu steigern. Eine vielversprechende Initiative, die in zahlreichen Staedten weltweit umgesetzt wird, ist die Einfuehrung von Leihfahrraedern. Diese Fahrradverleihsysteme bieten nicht nur eine umweltfreundliche Fortbewegungsalternative, sondern versprechen auch, das alltaegliche Leben der Stadtbewohner zu erleichtern.
+
+Die Grundidee hinter dieser Analyse ist es, die Effizienz und Nutzbarkeit solcher Leihfahrrad-Systeme zu optimieren. Der Fokus liegt dabei auf der Frage, wie man die Verfuegbarkeit von Leihfahrraedern so regulieren kann, dass sie genau dann und dort zur Verfuegung stehen, wo sie am meisten gebraucht werden. Dieser Aspekt ist von erheblicher Bedeutung, da er direkt zur Verkuerzung von Wartezeiten beitraegt und somit den Mobilitaetskomfort in der Stadt steigert.
+
+Ein zentrales Anliegen ist es, eine zuverlaessige und stabile Versorgung mit Leihfahrraedern sicherzustellen. Hierbei stellt die praezise Vorhersage der benoetigten Fahrradanzahl pro Stunde einen entscheidenden Schritt dar. Diese Vorhersage wird mithilfe einer sorgfaeltigen Analyse von umfangreichen Daten durchgefuehrt, die sowohl historische Nutzungsmuster als auch meteorologische Informationen umfassen. Die Integration von Wetterdaten wie Temperatur, Luftfeuchtigkeit, Windgeschwindigkeit und mehr erlaubt es, die Dynamik der Fahrradnachfrage in verschiedenen klimatischen Bedingungen zu verstehen.
+
+Diese Analyse zielt nicht nur darauf ab, die praktische Funktionalitaet von Leihfahrradsystemen zu optimieren, sondern bietet auch einen tieferen Einblick in die Wechselwirkungen zwischen urbaner Mobilitaet und Umweltbedingungen. Indem sie fortschrittliche Methoden der Datenanalyse und Prognose nutzt, ermoeglicht sie eine zukunftsorientierte Gestaltung staedtischer Fortbewegungssysteme. Letztlich verfolgt die Analyse das Ziel, zur Schaffung nachhaltiger, effizienter und nutzerfreundlicher Mobilitaetsloesungen beizutragen, die das Stadtleben in vielfacher Hinsicht bereichern.
+
+
+
+
+
+## II. Pakete laden und Daten importieren
+
+Im selben Schritt untersuche ich den Datensatz auf NAs.
+```{r}
+library(readr)
+library(tidyverse)
+library(tidymodels)
+library(easystats)
+library(tictoc)
+library(rstanarm)
+library(vip)
+library(MASS)
+library(parsnip)
+library(recipes)
+library(flextable)
+library(gt)
+library(magrittr)
+library(recipeselectors)
+library(lubridate)
+library(randomForest)
+library(beepr)
+library(corrr)
+library(datawizard)
+library(hrbrthemes)
+hrbrthemes::import_roboto_condensed()
+library(extrafont)
+library(viridis)
+loadfonts()
+```
+
+```{r}
+bikeshare_train <- read_csv("bikeshare_train.csv")
+bikeshare_test <- read_csv("bikeshare_test.csv")
+```
+
+
+Schauen wir, ob es fehlende Werte gibt:
+```{r}
+bikeshare_train |> 
+  summarise(across(everything(), ~ sum(is.na(.))))
+```
+im Train-Teil schon mal nicht.
+
+```{r}
+bikeshare_test |> 
+  summarise(across(everything(), ~ sum(is.na(.))))
+```
+Auch im Test-Teil keine fehlenden Werte gefunden. 
+
+
+
+
+## III. explorative Datenanalyse
+
+Schauen wir uns nun also mal an, zu welcher Uhrzeit die Menschen Fahrraeder ausleihen.
+```{r}
+ggplot(bikeshare_train |> 
+  group_by(hour) |> 
+  summarize(m_count = mean(count)), aes(x = hour, y = m_count)) +
+  geom_point(aes(color = hour), size = 7, alpha = 0.7) +
+  geom_smooth(method = "loess", se = FALSE, color = "blue", linetype = "dashed") +
+  geom_text(aes(label = round(m_count, 0)), hjust = -.1, vjust = .5, size = 3) +
+  labs(x = "Stunde", y = "mittlere Anzahl ausgeliehener Fahrraeder") +
+  ggtitle("Durchschnittliche Anzahl pro Stunde") +
+  theme_ipsum() +
+  scale_color_viridis_c(option = "E") 
+```
+
+
+Wir sehen, dass morgens um 5 Uhr etwa 140 Fahrraeder verliehen waren. 
+Die Zahl steigt ab dann ziemlich schnell bis auf knapp 1000 um 8 Uhr morgens. 
+Das heisst, der erste Ansturm auf Fahrraeder findet zwischen 5 und 8 Uhr statt. 
+
+Ab 10 Uhr steigt die Nachfrage nach Leihfahrraedern bis 16 Uhr leicht und stetig an, um dann ab 18 Uhr wieder durch die Decke zu gehen.
+
+Die Stosszeiten, in denen die Nachfrage besonders hoch ist, koennten berufsbedingt sein und darauf hindeuten, dass viele Menschen das Leihfahrrad nutzen, um morgens in die Arbeit und nachmittags wieder heim zu fahren.
+
+
+
+
+
+Schauen wir uns mal an, wie die Temperatur das Ausleihverhalten beeinflusst.
+```{r}
+ggplot(bikeshare_train |> 
+  mutate(temperature_bin = cut(temp, breaks = seq(-20, 40, by = 5))) |> 
+  group_by(temperature_bin) |> 
+  summarize(m_count = mean(count)), aes(x = temperature_bin, y = m_count, fill = temperature_bin)) +
+  geom_bar(stat = "identity", color = "white") +
+  geom_text(aes(label = round(m_count, 0)), vjust = -0.5, size = 3, color = "white") +
+  labs(x = "Temperaturbereich", y = "mittlere Anzahl ausgeliehener Fahrraeder") +
+  ggtitle("Durchschnittliche Anzahl pro 5 Grad") +
+  theme_minimal() +
+  scale_fill_viridis_d(option = "C") +
+  theme(
+    plot.title = element_text(size = 14, hjust = 0.5),
+    axis.title = element_text(size = 12),
+    axis.text = element_text(size = 10),
+    legend.position = "none")
+```
+
+
+Augenscheinlich spielt auch die Temperatur eine wichtige Rolle in bezug auf ausgeliehene Fahrraeder. Es scheint als wuerden die meisten Menschen vor allem dann ein Fahrrad ausleihen, wenn es draussen angenehm warm ist. Was ein Wunder!
+Aber wirklich interessant ist, dass es ab etwa 30 Grad Celsius zu warm ist und die durchschnittliche Anzahl ausgeliehener Fahrraeder wieder abnimmt. 
+
+
+
+
+Hat die Variable Windgeschwindigkeit einen Einfluss? Immerhin faehrt es sich bedeutend schlechter bei Gegenwind.
+```{r}
+ggplot(bikeshare_train |> 
+  mutate(windspeed_bin = cut(windspeed, breaks = seq(0, 8, by = .25))) |> 
+  group_by(windspeed_bin) |> 
+  summarize(m_count = mean(count)), 
+  aes(x = windspeed_bin, y = m_count, fill = windspeed_bin)) +
+  geom_bar(stat = "identity", color = "white") +
+  geom_text(aes(label = round(m_count, 0)), vjust = -0.5, size = 3, color = "white") +
+  labs(x = "Windgeschwindigkeit in m/s", y = "mittlere Anzahl ausgeliehener Fahrraeder") +
+  ggtitle("Durchschnittliche Anzahl bei geg. Windgeschwindigkeit") +
+  theme_minimal() +
+  scale_fill_viridis_d(option = "G") +
+  theme(
+    plot.title = element_text(size = 14, hjust = 0.5),
+    axis.title = element_text(size = 12),
+    axis.text = element_text(size = 4),
+    legend.position = "none")
+```
+
+
+Es scheint recht durcheinander. Weder eine besonders niedrige, noch eine besonders hohe Windgeschwindigkeit sind entscheidend fuer die Anzahl ausgeliehener Fahrraeder. 
+Prinzipiell ist viel Wind aber wahrscheinlich auch ein Zeichen fuer schlechtes Wetter.
+
+
+
+
+Werfen wir doch einen Blick auf die Jahreszeiten und finden heraus, wann die meisten Fahrraeder ausgeliehen werden.
+```{r}
+ggplot(bikeshare_train |> 
+  group_by(season) |> 
+  summarize(m_count = mean(count)) |> 
+  arrange(m_count), 
+  aes(x = reorder(season, m_count), y = m_count, fill = season)) +
+  geom_bar(stat = "identity", color = "white") +
+  geom_text(aes(label = round(m_count, 0)), vjust = -0.5, size = 3, color = "white") +
+  labs(x = "Jahreszeit", y = "Durchschnittliche Anzahl ausgeliehener Fahrraeder") +
+  ggtitle("Durchschnittliche Anzahl je Jahreszeit") +
+  theme_ipsum() +
+  scale_fill_ipsum() +
+  theme(
+    plot.title = element_text(size = 20, hjust = 0.5, face = "bold", color = "#4C72B0"),
+    axis.title = element_text(size = 16),
+    axis.text = element_text(size = 14),
+    axis.text.x = element_text(angle = 45, vjust = 0.5, hjust = 1),
+    legend.position = "none",
+    panel.grid.major.y = element_line(color = "gray80"))
+```
+
+
+Wow, im Sommer werden die meisten Fahrraeder ausgeliehen! - Wer haette das gedacht?
+
+Hervorhebenswert finde ich aber trotzdem, dass die durchschnittliche Nachfrage im Fruehling etwas unter der Nachfrage im Herbst liegt. 
+Koennte daran liegen, dass das Wetter im Herbst unter Umstaenden besser ist.
+
+
+
+
+Wir sollten uns nun anschauen, welchen Einfluss das Wetter auf die Ausleihbereitschaft hat.
+```{r}
+# 1. solar
+ggplot(bikeshare_train, aes(x = solar)) +
+  geom_histogram(fill = "blue", color = "white") +
+  labs(title = "Verteilung solar",
+       x = "solar",
+       y = "Anzahl")
+
+bikeshare_train |> 
+  count(solar == 0) |> 
+  mutate(prob = n/sum(n)) |> 
+  round(digits = 2)
+```
+"solar" besteht zu fast 50% aus dem Wert 0. Das ist ein bisschen mager um eine richtig gute Vorhersage zu machen.
+
+```{r}
+# 2. rain
+ggplot(bikeshare_train, aes(x = rain)) +
+  geom_histogram(fill = "blue", color = "white") +
+  labs(title = "Verteilung rain",
+       x = "Regen",
+       y = "Anzahl")
+
+bikeshare_train |> 
+  count(rain == 0) |> 
+  mutate(prob = n/sum(n)) |> 
+  round(digits = 2)
+```
+"rain" besteht sogar zu 94% aus dem Wert 0. Das sind aber keine zuverlaessigen Wetterdaten...
+
+```{r}
+# 3. snow
+ggplot(bikeshare_train, aes(x = snow)) +
+  geom_histogram(fill = "blue", color = "white") +
+  labs(title = "Verteilung snow",
+       x = "snow",
+       y = "Anzahl")
+
+bikeshare_train |> 
+  count(snow == 0) |> 
+  mutate(prob = n/sum(n)) |> 
+  round(digits = 2)
+```
+bei "snow" sind es sogar 95%! Ich glaube wir lassen das mit dem Wetter lieber sein.
+
+
+Na gut, man koennte sich immerhin ansehen, wie es sich bei vorhanden Wetterdaten verhaelt.
+So nur mal fuer Spasss (mit 3 s) - Spasss
+```{r}
+ggplot(bikeshare_train |> 
+  mutate(solar_bin = cut(solar, breaks = seq(0, 3.5, by = .5))) |> 
+  group_by(solar_bin) |> 
+  summarize(m_count = mean(count)) |> 
+         filter(solar_bin != 0),
+       aes(x = solar_bin, y = m_count, fill = solar_bin)) +
+  geom_bar(stat = "identity", color = "white") +
+  geom_smooth(method = "lm") +
+  geom_text(aes(label = round(m_count, 0)), vjust = -0.5, size = 3, color = "white") +
+  labs(x = "Einstrahlungsbereich in MJ/m2", y = "mittlere Anzahl ausgeliehener Fahrraeder") +
+  ggtitle("Durchschnittliche Anzahl") +
+  theme_minimal() +
+  scale_fill_brewer(palette = "Pastel1")
+```
+
+
+Man koennte einen leichten positiven Zusammenhang zwischen Sonneneinstrahlung und der Anzahl ausgeliehener Fahrraeder interpretieren. Aber angesichts der Tatsache, dass wir hier nur 50% der Werte haben, denke ich ist es besser, der Variable "solar" weniger Aufmerksamkeit zu schenken.
+
+
+
+
+Schauen wir uns den Regen mal etwas genauer an:
+```{r}
+ggplot(bikeshare_train |> 
+  mutate(rain_bin = cut(rain, breaks = seq(0, 30, by = 2))) |> 
+  group_by(rain_bin) |> 
+  summarize(m_count = mean(count)) |> 
+         filter(rain_bin != 0),
+       aes(x = rain_bin, y = m_count, fill = rain_bin)) +
+  geom_bar(stat = "identity", color = "white") +
+  geom_smooth(method = "lm") +
+  geom_text(aes(label = round(m_count, 0)), vjust = -0.5, size = 3, color = "white") +
+  labs(x = "Niederschlag in mm", y = "mittlere Anzahl ausgeliehener Fahrraeder") +
+  ggtitle("Durchschnittliche Anzahl bei geg. Niederschlag") +
+  theme_minimal() +
+    theme(legend.position = "none",
+        plot.title = element_text(size = 18, hjust = 0.5),
+        axis.title = element_text(size = 14),
+        axis.text = element_text(size = 10))
+```
+
+
+Laut den Daten, die nicht 0 sind, werden die meisten Fahrraeder ausgeliehen, wenn es zwischen 20 und 22 mm regnet. 
+
+
+
+Und weil das wahrscheinlich Unsinn ist, schauen wir schnell noch den Schnee an.
+```{r}
+ggplot(bikeshare_train |> 
+  mutate(snow_bin = cut(snow, breaks = seq(0, 9, by = 1))) |> 
+  group_by(snow_bin) |> 
+  summarize(m_count = mean(count)) |> 
+         filter(snow_bin != 0),
+       aes(x = snow_bin, y = m_count, fill = snow_bin)) +
+  geom_bar(stat = "identity", color = "white") +
+  geom_text(aes(label = round(m_count, 0)), vjust = -0.5, size = 3, color = "white") +
+  labs(x = "Schneefall in cm", y = "mittlere Anzahl ausgeliehener Fahrraeder") +
+  ggtitle("Durchschnittliche Anzahl bei geg. Schneefall") +
+  theme_minimal() +
+   scale_fill_brewer(palette = "Pastel1") +
+    theme(legend.position = "none",
+        plot.title = element_text(size = 18, hjust = 0.5),
+        axis.title = element_text(size = 14),
+        axis.text = element_text(size = 10))
+```
+
+
+Hier scheint die Datenlage zumindest etwas realistischer zu sein, da wir einen negativen Zusammenhang zwischen der Menge an gefallenem Schnee und der Anzahl der ausgeliehenen Fahrraeder erkennen koennen. 
+
+
+Um zu bewerten, wie verlaesslich diese Daten sind, vergleiche ich sie mit der Jahreszeit:
+```{r}
+bikeshare_train |> 
+  group_by(season) |> 
+  summarise(mean(snow))
+```
+Augenscheinlich schneit es vor allem im Winter, aber auch im Herbst.
+
+
+Gerade haben wir gesehen, dass die Nachfrage nach Fahrraedern im Herbst etwas ueber der Nachfrage im Fruehling liegt. 
+Dieses Ergebnis legt jedoch nahe, dass es im Herbst weniger Nachfrage geben muesste, da es im Herbst haeufiger schneit als im Fruehling und es einen negativen Zusammenhang zwischen der Schneemenge und der Anzahl ausgeliehener Fahrraeder gibt. 
+
+
+
+
+Abschliessend interessiert mich noch, ob in den Ferien mehr Fahrraeder ausgeliehen werden.
+```{r}
+bikeshare_train |> 
+  group_by(holiday) |> 
+  summarise(mean(count))
+```
+
+Es scheint als waere die Nachfrage nach Fahrraedern in den Ferien tatsaechlich geringer als an den anderen Tagen.
+
+Zur Veranschaulichung:
+```{r}
+ggplot(bikeshare_train, aes(x = hour, y = count, color = holiday)) +
+  geom_smooth() +
+  labs(x = "Stunde des Tages", y = "Anzahl ausgeliehener Fahrraeder") +
+  ggtitle("Anzahl nach Stunde und Feiertagsstatus") +
+   theme_ipsum() +
+  scale_color_ipsum() +
+  theme(
+    plot.title = element_text(size = 20, hjust = 0.5, face = "bold", color = "#4C72B0"),
+    axis.title = element_text(size = 16),
+    axis.text = element_text(size = 14),
+    legend.position = "bottom",
+    panel.grid.major.y = element_line(color = "gray80"))
+```
+
+
+Wir sehen zwischen Holiday und no Holiday einen deutlichen Unterschied, denn die starken Peaks, die bei no Holiday um 8 und um 18 Uhr stattfinden, bleiben waehrend der Ferien aus, was darauf hindeutet, dass die Fahrraeder vor allem von Schuelern benutzt werden, die an die Ferien gebunden sind. 
+
+
+
+
+
+
+## IV. Feauture Engineering
+
+Nun, da wir eine umfassende uebersicht ueber die Daten haben, kann ich mich daran machen, die Daten etwas aufzuhuebschen.
+
+Schauen wir uns also zuerst den Datensatz etwas genauer an:
+```{r}
+head(bikeshare_train)
+```
+
+Wenn kein Betrieb ist, werden auch keine Fahrraeder gebraucht.
+Aus diesem Grund werde ich die "func" nicht in der Vorhersage beruecksichtigt und aus dem Datensatz die Zeilen entfernt, die "No" enthalten.
+
+Ich erstelle zuerst einen Backup-Datensatz
+```{r}
+d_bikeshare <-
+  bikeshare_train
+  
+
+d_bikeshare <-
+  d_bikeshare |> 
+  filter(func == "Yes")
+
+d_bikeshare |> 
+  group_by(func) |> 
+  summarize(mean_count = mean(count))
+```
+
+Es gibt jetzt also nur noch den Wert Yes. 
+Dies muss spaeter im fertigen Modell beruecksichtigt werden.
+
+
+
+Da Zahlen alleine immer so schwer zu interpretieren sind, hier lieber ein Plot der Mittelwerte (Mean):
+
+```{r}
+ggplot(describe_distribution(d_bikeshare) , aes(x = Variable, y = Mean, color = Variable)) +
+  geom_point(size = 3, alpha = 0.7) +
+  theme_minimal() +
+  labs(title = "Verteilung der Mittelwerte",
+       x = "Variable",
+       y = "Mittelwert",
+       color = "Variable") +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+```
+
+
+Wir sehen deutlich, dass die Mittelwerte von Visibility und count stark von den anderen im Wert abweichen. 
+Hier sollten wir was tun.
+
+
+
+
+Haben wir starke Korrelationen?
+```{r}
+Korrelationen <-
+  bikeshare_train |> 
+  select_if(is.numeric) |> 
+  correlations()
+
+Korrelationen_df <- as.data.frame(as.table(Korrelationen))
+
+Korrelationen_df_upper <- Korrelationen_df %>%
+  filter(row_number(Var1) < row_number(Var2))
+
+ggplot(data = Korrelationen_df_upper, aes(x = Var1, y = Var2)) +
+  geom_tile(aes(fill = Freq), color = "white") +
+  geom_text(aes(label = sprintf("%.2f", Freq)), vjust = 1, color = "white") +
+  scale_fill_viridis_c(option = "C", name = "Korrelation") +
+  theme_ipsum() +
+  theme(
+    plot.title = element_text(size = 20, hjust = 0.5, face = "bold", color = "#4C72B0"),
+    axis.text.x = element_text(angle = 45, hjust = 1, size = 10, color = "black"),
+    axis.text.y = element_text(size = 10, color = "black"),
+    legend.position = "right",
+    legend.text = element_text(size = 10),
+    legend.title = element_text(size = 12)) +
+  labs(
+    title = "Korrelationstabelle Heatmap",
+    x = "Variable 1",
+    y = "Variable 2",
+    fill = "Korrelation")
+```
+
+
+Ja, besonders die Korrelation zwischen "dewpointtemp" und "temp" mit .91
+Das koennte ein Hinweis auf einen Interaktionseffekt sein. Eventuell sollte man eine Variable aus dem Modell entfernen.
+
+
+
+
+
+## V. Modellierung
+
+neuer Backup-Datensatz
+```{r}
+data <-
+  bikeshare_train |> 
+  dplyr::select(-c(solar, rain, snow)) |> 
+  filter(func != "No") |> 
+  filter(windspeed != 7.4) |> 
+  filter(temp != 39.0) |> 
+  dplyr::select(-c(func, dewpointtemp, date))
+
+data$season <- as.factor(data$season)
+data$holiday <- as.factor(data$holiday)
+
+glimpse(data)
+```
+
+Zeit die Daten zu splitten
+```{r}
+set.seed(23)
+split <- initial_split(data, prop = 0.75,
+                             strata = count)
+train <- split |> 
+          training()
+test <- split |> 
+          testing()
+```
+
+
+```{r}
+Tree <- decision_tree(cost_complexity = tune(),
+                            tree_depth = tune(),
+                            min_n = tune()) %>% 
+              set_engine('rpart') %>% 
+              set_mode('regression')
+
+Ranger <- rand_forest(mtry = tune(),
+                        trees = tune(),
+                        min_n = tune()) %>% 
+              set_engine('ranger', importance = "impurity") %>% 
+              set_mode('regression')
+
+Boost <- boost_tree(mtry = tune(),
+                        min_n = tune(),
+                        trees = tune()) %>% 
+              set_engine('xgboost', nthreads = parallel::detectCores()) %>% 
+              set_mode('regression')
+
+LM <- linear_reg() %>%
+  set_engine("lm") %>%
+  set_mode("regression")
+
+rec1 <- recipe(count ~ ., data = train) |> 
+  step_dummy(holiday, season) |> 
+  step_log(visibility)
+
+cv5 <- vfold_cv(train, 
+               strata = "count", 
+               repeats = 5, 
+               v = 5) 
+
+preproc <- list(rec1 = rec1)
+
+models <- list(Ranger = Ranger,
+               LinMod = LM,
+               XGBoost = Boost,
+               DecTree = Tree)
+
+all_workflows <- workflow_set(preproc, models, cross = TRUE)
+
+parallel::detectCores()
+doParallel::registerDoParallel(cores = 10)
+tic()
+  TuningSet <-
+    workflow_map(
+      object = all_workflows,
+      fn = "tune_grid",
+      resamples = cv5, 
+      grid = 10,
+      seed = 23,
+      verbose = TRUE) 
+toc()
+beep("ping")
+```
+Tuning Set beurteilen
+
+```{r}
+rank_results(TuningSet, rank_metric = "rmse")
+
+autoplot(TuningSet, metric = "rmse")
+
+
+collect_metrics(TuningSet) |> 
+  arrange(std_err)
+
+best_Params <-
+extract_workflow_set_result(TuningSet, "rec1_Ranger") |> 
+  select_best()
+
+best_Params
+
+
+best_wf <- 
+all_workflows |>  
+  extract_workflow("rec1_Ranger")
+
+best_wf
+
+best_fit <- 
+  best_wf |> 
+  finalize_workflow(best_Params)
+best_fit
+
+
+tic()
+fin_fit <-
+  best_fit |> 
+  last_fit(split)
+fin_fit
+toc()
+
+collect_metrics(fin_fit)
+
+fin_fit |> 
+  extract_fit_parsnip() |> 
+  vip()
+
+Pred <- 
+fin_fit |> 
+  collect_predictions()|> 
+  mutate(Fehler = .pred - count) |> 
+  dplyr::select(-c(id, .row, .config))
+```
+
+Zugegeben, meine Vorhersagefehler sind schon relativ gross.
+
+
+
+ ## VI. Abschliessende Prognose und Abgabe
+```{r}
+t_bikeshare <- bikeshare_test 
+
+t_bikeshare$date <- dmy(t_bikeshare$date)
+t_bikeshare$season <- as.factor(t_bikeshare$season)
+t_bikeshare$holiday <- as.factor(t_bikeshare$holiday)
+t_bikeshare$func <- as.factor(t_bikeshare$func)
+
+trained_wf <- best_fit |> 
+  fit(data = train)
+
+Vorhersagen <- 
+  trained_wf |> 
+  predict(new_data = t_bikeshare) |> 
+  bind_cols(t_bikeshare) |> 
+  mutate(.pred = case_when(func == "No" ~ 0,
+                            TRUE ~ .pred)) 
+
+Vorhersagen$.pred <- round(x = Vorhersagen$.pred, digits = 0)
+
+print(head(Vorhersagen))
+
+Abgabe_Predictions <-
+  Vorhersagen |> 
+  dplyr::select(.pred) |> 
+  mutate(pred = .pred) |> 
+  dplyr::select(-.pred) |> 
+  mutate(id = 1:n()) |> 
+  dplyr::select(id, pred)
+
+print(head(Abgabe_Predictions))
+
+write.csv(Abgabe_Predictions, "Wich_Simon_0161615_Prognose.csv", row.names = FALSE)
+```
+
+
+
+
+
+Zum Vergleich mit dem Plot am Anfang:
+```{r}
+ggplot(Vorhersagen |> 
+  group_by(hour) |> 
+  summarize(m_count = mean(.pred)), 
+  aes(x = hour, y = m_count)) +
+  geom_point(aes(color = hour), size = 7, alpha = 0.7) +
+  geom_smooth(method = "loess", se = FALSE, color = "blue", linetype = "dashed") +
+  geom_text(aes(label = round(m_count, 0)), hjust = -.1, vjust = .5, size = 3) +
+  labs(x = "Stunde", y = "mittlere Anzahl ausgeliehener Fahrraeder") +
+  ggtitle("Durchschnittliche Anzahl pro Stunde") +
+  theme_ipsum() +
+  scale_color_viridis_c(option = "E") +
+  theme(
+    plot.title = element_text(size = 18, hjust = 0.5),
+    axis.title = element_text(size = 18),
+    axis.text = element_text(size = 18),
+    legend.position = "none") 
+```
+
+
+Meine Vorhersagen sehen dem Modell oben schon ziemlich aehnlich. 
+Insgesamt schaetzt das Modell den Bedarf etwas geringer ein, als der Train-Datensatz suggeriert, jedoch ist das Ergebnis in meinen Augen zufriedenstellend.
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
